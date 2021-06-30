@@ -60,7 +60,7 @@ from libs.hashableQListWidgetItem import HashableQListWidgetItem
 __appname__ = 'labelImg'
 
 
-class Load(QThread):
+class Load_SSD(QThread):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
@@ -71,8 +71,10 @@ class Load(QThread):
             target_dir_path = self.target_dir_path + '/saved_model'
             self.parent.detect_fn = tf.saved_model.load(target_dir_path)
 
-            self.parent.ssd_mobilenet = True
-            self.parent.statusBar().showMessage('Loading Complete')
+            self.parent.ssd = True
+            self.parent.yolo = False
+
+            self.parent.statusBar().showMessage('Model Loading Complete')
         except OSError:
             self.parent.statusBar().showMessage('⚠️ Loading Failed')
 
@@ -104,13 +106,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
         #setting model
         self.detect_fn = None
-        self.category_index = {
-            1: 'pet',
-            2: 'pp',
-            3: 'ps'
-        }
-        self.load_thread = Load(self)
-        self.ssd_mobilenet = False
+        self.category_index = {}
+        self.load_ssd = Load_SSD(self)
+        self.ssd = False
+        self.yolo = False
+        self.labelmap = False
 
         # Load setting in the main thread
         self.settings = Settings()
@@ -272,6 +272,9 @@ class MainWindow(QMainWindow, WindowMixin):
         open_model = action(get_str('load_model'), self.load_model,
                       'Ctrl+M', 'open', get_str('load_model'))
 
+        open_labelmap = action(get_str('load_label'), self.load_label,
+                            'Ctrl+B', 'open', get_str('load_label'))
+
 
         def get_format_meta(format):
             """
@@ -412,6 +415,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.menus = Struct(
             file=self.menu(get_str('menu_file')),
+            model=self.menu(get_str('menu_model')),
             edit=self.menu(get_str('menu_edit')),
             view=self.menu(get_str('menu_view')),
             help=self.menu(get_str('menu_help')),
@@ -435,8 +439,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.display_label_option.setChecked(settings.get(SETTING_PAINT_LABEL, False))
         self.display_label_option.triggered.connect(self.toggle_paint_labels_option)
 
+        add_actions(self.menus.model, (open_model, open_labelmap))
         add_actions(self.menus.file,
-                    (open, open_model, open_dir, change_save_dir, open_annotation, copy_prev_bounding, self.menus.recentFiles, save, save_format, save_as, close, reset_all, delete_image, quit))
+                    (open, open_dir, change_save_dir, open_annotation, copy_prev_bounding, self.menus.recentFiles, save, save_format, save_as, close, reset_all, delete_image, quit))
         add_actions(self.menus.help, (help_default, show_info, show_shortcut))
         add_actions(self.menus.view, (
             self.auto_saving,
@@ -1182,7 +1187,7 @@ class MainWindow(QMainWindow, WindowMixin):
             elif os.path.isfile(json_path):
                 self.load_create_ml_json_by_filename(json_path, file_path)
             else:
-                if self.ssd_mobilenet:
+                if self.ssd and self.labelmap:
                     self.load_bnd_from_predict(file_path)
 
         else:
@@ -1193,7 +1198,7 @@ class MainWindow(QMainWindow, WindowMixin):
             elif os.path.isfile(txt_path):
                 self.load_yolo_txt_by_filename(txt_path)
             else:
-                if self.ssd_mobilenet:
+                if self.ssd and self.labelmap:
                     self.load_bnd_from_predict(file_path)
 
     def resizeEvent(self, event):
@@ -1631,26 +1636,53 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.set_drawing_shape_to_square(self.draw_squares_option.isChecked())
 
     def load_model(self, _value=False, dir_path=None, silent=False):
-        if not self.may_continue():
-            return
+        models = ('SSD', 'YOLO')
+        select_model, ok = QInputDialog.getItem(self, "Object Detection", "Model Selected", models, 0, False)
 
-        default_open_dir_path = dir_path if dir_path else '.'
-        if self.last_open_dir and os.path.exists(self.last_open_dir):
-            default_open_dir_path = self.last_open_dir
+        if ok and select_model == 'SSD':
+            if not self.may_continue():
+                return
+            default_open_dir_path = dir_path if dir_path else '.'
+            if self.last_open_dir and os.path.exists(self.last_open_dir):
+                default_open_dir_path = self.last_open_dir
+            else:
+                default_open_dir_path = os.path.dirname(self.file_path) if self.file_path else '.'
+            if silent != True:
+                target_dir_path = ustr(QFileDialog.getExistingDirectory(self,
+                                                                        '%s - Open Directory' % __appname__,
+                                                                        default_open_dir_path,
+                                                                        QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks))
+            else:
+                target_dir_path = ustr(default_open_dir_path)
+
+            self.last_open_dir = target_dir_path
+            self.load_ssd.target_dir_path = target_dir_path
+            self.load_ssd.start()
+            self.statusBar().showMessage('Loading model...')
+
+        elif ok and select_model == 'YOLO':
+            QMessageBox.information(self, u'Information', '아직 구현되지 않았습니다!')
         else:
-            default_open_dir_path = os.path.dirname(self.file_path) if self.file_path else '.'
-        if silent != True:
-            target_dir_path = ustr(QFileDialog.getExistingDirectory(self,
-                                                                    '%s - Open Directory' % __appname__, default_open_dir_path,
-                                                                    QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks))
-        else:
-            target_dir_path = ustr(default_open_dir_path)
-        self.last_open_dir = target_dir_path
-        self.load_thread.target_dir_path = target_dir_path
-        self.load_thread.start()
-        self.statusBar().showMessage('Loading model...')
+            QMessageBox.critical(self, u'Error loading model', 'model not selected')
 
-
+    def load_label(self):
+        path = os.path.dirname(ustr(self.file_path)) \
+            if self.file_path else '.'
+        filters = "Open Labelmap TXT file (%s)" % ' '.join(['*.txt'])
+        filename = ustr(QFileDialog.getOpenFileName(self, 'Open Label map', path, filters))
+        try:
+            if filename:
+                if isinstance(filename, (tuple, list)):
+                    filename = filename[0]
+                label_file = open(filename)
+                labels = label_file.readlines()
+                for i, label in enumerate(labels):
+                    self.category_index[i] = label.strip('\n')
+                self.labelmap = True
+                self.status('Labelmap Loading Complete')
+        except:
+            QMessageBox.critical(self, u'Error opening file', 'file path error')
+            self.status('Loading Lable map error')
 
     def load_bnd_from_predict(self, file_path):
         shapes = []
