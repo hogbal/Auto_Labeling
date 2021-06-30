@@ -30,7 +30,9 @@ except ImportError:
     from PyQt4.QtCore import *
 
 import time
+import cv2
 import tensorflow as tf
+from tensorflow.python.saved_model import tag_constants
 import numpy as np
 from PIL import Image
 from six import BytesIO
@@ -61,6 +63,8 @@ __appname__ = 'labelImg'
 
 
 class Load_SSD(QThread):
+    finished = pyqtSignal(str)
+
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
@@ -68,11 +72,34 @@ class Load_SSD(QThread):
 
     def run(self):
         try:
+            data = 'Loding Model...'
+            self.finished.emit(data)
             target_dir_path = self.target_dir_path + '/saved_model'
             self.parent.detect_fn = tf.saved_model.load(target_dir_path)
 
             self.parent.ssd = True
             self.parent.yolo = False
+
+            data = 'Model Loading Complete'
+            self.finished.emit(data)
+
+        except OSError:
+            data = 'Loading Failed'
+            self.finished.emit(data)
+
+class Load_YOLOv4(QThread):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.target_dir_path = None
+
+    def run(self):
+        try:
+            target_dir_path = self.target_dir_path
+            self.parent.detect_fn = tf.saved_model.load(target_dir_path, tags=[tag_constants.SERVING])
+
+            self.parent.ssd = False
+            self.parent.yolov4 = True
 
             self.parent.statusBar().showMessage('Model Loading Complete')
         except OSError:
@@ -108,8 +135,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.detect_fn = None
         self.category_index = {}
         self.load_ssd = Load_SSD(self)
+        self.load_ssd.finished.connect(self.compelete_message)
+        self.load_yolov4 = Load_YOLOv4(self)
         self.ssd = False
-        self.yolo = False
+        self.yolov4 = False
         self.labelmap = False
 
         # Load setting in the main thread
@@ -1188,7 +1217,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.load_create_ml_json_by_filename(json_path, file_path)
             else:
                 if self.ssd and self.labelmap:
-                    self.load_bnd_from_predict(file_path)
+                    self.load_bnd_from_predict_ssd(file_path)
+                if self.yolov4 and self.labelmap:
+                    self.load_bnd_from_predict_yolov4(file_path)
 
         else:
             xml_path = os.path.splitext(file_path)[0] + XML_EXT
@@ -1199,7 +1230,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.load_yolo_txt_by_filename(txt_path)
             else:
                 if self.ssd and self.labelmap:
-                    self.load_bnd_from_predict(file_path)
+                    self.load_bnd_from_predict_ssd(file_path)
+                if self.yolov4 and self.labelmap:
+                    self.load_bnd_from_predict_yolov4(file_path)
 
     def resizeEvent(self, event):
         if self.canvas and not self.image.isNull()\
@@ -1636,7 +1669,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.set_drawing_shape_to_square(self.draw_squares_option.isChecked())
 
     def load_model(self, _value=False, dir_path=None, silent=False):
-        models = ('SSD', 'YOLO')
+        models = ('SSD', 'YOLOv4')
         select_model, ok = QInputDialog.getItem(self, "Object Detection", "Model Selected", models, 0, False)
 
         if ok and select_model == 'SSD':
@@ -1658,10 +1691,30 @@ class MainWindow(QMainWindow, WindowMixin):
             self.last_open_dir = target_dir_path
             self.load_ssd.target_dir_path = target_dir_path
             self.load_ssd.start()
-            self.statusBar().showMessage('Loading model...')
 
-        elif ok and select_model == 'YOLO':
-            QMessageBox.information(self, u'Information', '아직 구현되지 않았습니다!')
+        elif ok and select_model == 'YOLOv4':
+            QMessageBox.information(self, 'Information', '구현중입니다..!')
+            '''
+            if not self.may_continue():
+                return
+            default_open_dir_path = dir_path if dir_path else '.'
+            if self.last_open_dir and os.path.exists(self.last_open_dir):
+                default_open_dir_path = self.last_open_dir
+            else:
+                default_open_dir_path = os.path.dirname(self.file_path) if self.file_path else '.'
+            if silent != True:
+                target_dir_path = ustr(QFileDialog.getExistingDirectory(self,
+                                                                        '%s - Open Directory' % __appname__,
+                                                                        default_open_dir_path,
+                                                                        QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks))
+            else:
+                target_dir_path = ustr(default_open_dir_path)
+
+            self.last_open_dir = target_dir_path
+            self.load_yolov4.target_dir_path = target_dir_path
+            self.load_yolov4.start()
+            self.statusBar().showMessage('Loading model...')
+            '''
         else:
             QMessageBox.critical(self, u'Error loading model', 'model not selected')
 
@@ -1679,12 +1732,13 @@ class MainWindow(QMainWindow, WindowMixin):
                 for i, label in enumerate(labels):
                     self.category_index[i] = label.strip('\n')
                 self.labelmap = True
-                self.status('Labelmap Loading Complete')
+                self.status('Label Map Loading Complete')
+                QMessageBox.information(self, 'Information', 'Label Map Loading Complete')
         except:
-            QMessageBox.critical(self, u'Error opening file', 'file path error')
             self.status('Loading Lable map error')
+            QMessageBox.critical(self, u'Error opening file', 'file path error')
 
-    def load_bnd_from_predict(self, file_path):
+    def load_bnd_from_predict_ssd(self, file_path):
         shapes = []
 
         img_data = tf.io.gfile.GFile(file_path, 'rb').read()
@@ -1708,6 +1762,43 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 self.load_labels(shapes)
                 break
+
+    def load_bnd_from_predict_yolov4(self, file_path):
+        shapes = []
+
+        original_image = cv2.imread(file_path)
+        original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+
+        image_data = original_image / 255.
+
+        images_data = []
+        for i in range(1):
+            images_data.append(image_data)
+        images_data = np.asarray(images_data).astype(np.float32)
+        infer = self.detect_fn.signatures['serving_default']
+        batch_data = tf.constant(images_data)
+        pred_bbox = infer(batch_data)
+        print(pred_bbox)
+        '''
+        for i in range(len(detections['detection_scores'][0])):
+            if detections['detection_scores'][0][i].numpy() > 0.5:
+                y_min = int(detections['detection_boxes'][0][i].numpy()[0] * im_height)
+                x_min = int(detections['detection_boxes'][0][i].numpy()[1] * im_width)
+                y_max = int(detections['detection_boxes'][0][i].numpy()[2] * im_height)
+                x_max = int(detections['detection_boxes'][0][i].numpy()[3] * im_width)
+                label = self.category_index[detections['detection_classes'][0][i].numpy()]
+                difficult = False
+
+                points = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
+                shapes.append((label, points, None, None, difficult))
+            else:
+                self.load_labels(shapes)
+                break
+        '''
+
+    def compelete_message(self, data):
+        self.status(data)
+        QMessageBox.information(self, 'Information', data)
 
         
 def inverted(color):
